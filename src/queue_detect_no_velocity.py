@@ -7,7 +7,7 @@ from tqdm import tqdm
 import torch
 from shapely.geometry import Polygon
 from shapely.geometry import Point
-
+import datetime
 from deep_sort.tracker import Tracker
 from deep_sort import nn_matching
 from my_utils.encoder_torch import Extractor
@@ -47,6 +47,7 @@ def run(
     for x, y in zip(*[iter(finish_area)]*2):   # loop 2 coords at a time
         finish_vertices.append((x,y))
     finish_polyogn = Polygon(finish_vertices)
+
     device = utils.select_device(device)
     use_gpu = device == torch.device('cuda:0')
     print(device)
@@ -57,7 +58,7 @@ def run(
     if half:
         model.half()
     
-    encoder = Extractor(str(Path('model') / Path('ckpt.t7')))
+    encoder = Extractor(str(Path('../model') / Path('ckpt.t7')))
     max_cosine_distance = 0.2
     nn_budget = None
     
@@ -71,149 +72,167 @@ def run(
     queue_time = {}
 
     dir_path = Path(output_dir)
-    file_path = Path('output.txt')
+    file_path = Path('output.json')
     dir_path.mkdir(exist_ok=True)
-    if save_video:
-        for _, _, im0s, _, frame_idx in dataset:
-            height, width, _ = im0s.shape
-            break
-        size = (width, height)
-        fourcc = cv2.VideoWriter_fourcc('M','J','P','G')
-        video_writer = cv2.VideoWriter(str(dir_path / Path("out.avi")), fourcc, fps, size)
-    for _, img, im0s, _, frame_idx in tqdm(dataset):
-        if debug_frames > 0 and frame_idx > debug_frames:
-            break
-        
-
-        img = torch.from_numpy(img).to(device)
-        img = img.half() if half else img.float()  # uint8 to fp16/32
-        img /= 255.0  # 0 - 255 to 0.0 - 1.0
-        if img.ndimension() == 3:
-            img = img.unsqueeze(0)
-
-        bgr_image = im0s
-
-        
-        results = model(img)[0]
-        results = utils.non_max_suppression(results, conf_thres, iou_thres)
-        if(results[0].shape[0]==0):
-            continue
-
-        det = results[0]
-        det[:, :4] = utils.scale_coords(img.shape[2:], det[:, :4], im0s.shape).round()
-        person_ind = [i for i, cls in enumerate(det[:, -1]) if int(cls) == 0]   
-        xyxy = det[person_ind, :-2]  # find person only
-        xywh_boxes = utils.xyxy2xywh(xyxy)
-        tlwh_boxes = utils.xywh2tlwh(xywh_boxes)
-        confidence = det[:, -2]
-        if use_gpu:
-            tlwh_boxes = tlwh_boxes.cpu()
-            xyxy = xyxy.cpu()
-        xyxy_boxes = np.array(xyxy).astype(int)
-
-        features = encoder.get_features(xyxy_boxes, bgr_image)
-        
-        detections = [detection.Detection(bbox, confidence, 'person', feature) for bbox, confidence, feature in zip(tlwh_boxes, confidence, features)]
-
-        # Call the tracker
-        tracker.predict()
-        tracker.update(detections)
-
-        in_queueing_area = []   
-
-        if save_img or save_video:  
-            cv2.putText(bgr_image, "Queue: {}".format(str(list(queue.keys()))[1:-1]), (100, 50),          
-                cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 255), 2)
-            num_idx = len(queue_time)
-            avg_queue_time = sum(queue_time.values()) / num_idx if num_idx > 0 else 0
-            cv2.putText(bgr_image, "Time: {}".format(str((queue_time))[1:-1]), (100, 150),
-                cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 255), 2)
-            cv2.putText(bgr_image, "Avg time: {}".format(str(round(avg_queue_time, 1))), (100, 100),
-                cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 255), 2)
-            pts=np.array(queue_vertices,np.int32)
-            pts = pts.reshape((-1,1,2))
-            cv2.polylines(bgr_image,[pts],True,(255,0,0), 2) 
-            pts=np.array(finish_vertices,np.int32)
-            pts = pts.reshape((-1,1,2))
-            cv2.polylines(bgr_image,[pts],True,(255,255,0), 2) 
-
-
-        
-            
-        for track in tracker.tracks:
-            if not track.is_confirmed() or track.time_since_update > 1:
-                continue
-            track_id = track.track_id
-            bbox = track.to_tlbr()
-            center_x = int((bbox[0] + bbox[2]) / 2)
-            center_y = int((bbox[1] + bbox[3]) / 2)
-            cv2.putText(bgr_image, "ID: " + str(track_id), (int(center_x), int(center_y)), 0,
-                    1e-3 * bgr_image.shape[0], (255, 0, 0), 1)
-            if queue_polygon.intersects(Point(center_x, center_y)): 
-                if track_id in list(potential_queue.keys()):
-                    start_frame = potential_queue[track_id].start_frame
-                    potential_queue[track_id].accumulated_frames += 1
-                    accumulated_frames = potential_queue[track_id].accumulated_frames
-                    elapse_frames = frame_idx -  start_frame
-                    if elapse_frames > enqueue_thres * fps and accumulated_frames > elapse_frames * 0.8:
-                        queue[track_id] = Queuer(start_frame, (center_x, center_y), start_frame, False, None)
-                        in_queueing_area.append(track_id)
-                        del potential_queue[track_id]
-                    if save_video:
-                        cv2.rectangle(bgr_image, (int(bbox[0]), int(bbox[1])), (int(bbox[2]), int(bbox[3])), (0, 255, 0), 2)
-                        cv2.putText(bgr_image, str(round((frame_idx -  start_frame)/fps, 1)), (int(center_x), int(bbox[1])), 0,
-                                    1e-3 * bgr_image.shape[0], (0, 255, 0), 1)
-                elif track_id in queue:
-                    if not queue[track_id].enter_finish_area_frame:
-                        queue[track_id].last_frame = frame_idx
-                    queue[track_id].position = (center_x, center_y)
-                    in_queueing_area.append(track_id)
-                    if save_video:
-                        cv2.rectangle(bgr_image, (int(bbox[0]), int(bbox[1])), (int(bbox[2]), int(bbox[3])), (0, 0, 255), 2)
-                        cv2.putText(bgr_image, str(round((frame_idx -  queue[track_id].start_frame)/fps, 1)), (int(center_x), int(bbox[1])), 0,
-                                    1e-3 * bgr_image.shape[0], (0, 0, 255), 1)
-                else:
-                    addToPotential = True
-                    '''
-                    for queue_track_id in queue:
-                        (center_x2, center_y2) = queue[queue_track_id].position
-                        if abs(center_x-center_x2) + abs(center_y-center_y2) < identity_switch_thres:
-                            queue[track_id] = queue[queue_track_id]
-                            addToPotential = False
-                            del queue[queue_track_id]
-                            break
-                    '''
-                    if addToPotential:
-                        potential_queue[track_id] = PotentialQueuer(frame_idx, 0)
-                    
-        for track_id in list(queue.keys()):
-            queueing_time = round((queue[track_id].last_frame - queue[track_id].start_frame) / fps, 1)
-            queue_time[track_id] = queueing_time
-            if not queue[track_id].enter_finish_area_frame and finish_polyogn.intersects(Point(queue[track_id].position)):
-                queue[track_id].enter_finish_area_frame = frame_idx
-            if queue[track_id].enter_finish_area_frame and not queue[track_id].finish_queueing:
-                inside_finish_area_time = (frame_idx - queue[track_id].enter_finish_area_frame) / fps
-                if inside_finish_area_time > finish_thres:
-                    queue[track_id].finish_queueing = True
-            if track_id not in in_queueing_area and (frame_idx - queue[track_id].last_frame) / fps > dequeue_thres:
-                '''
-                if queue[track_id].finish_queueing:
-                    queueing_time = (queue[track_id].last_frame - queue[track_id].start_frame) / fps
-                    queue_time[track_id] = queueing_time
-                '''
-                del queue_time[track_id]
-                del queue[track_id]
+    p = Path(output_dir) / file_path
+    with p.open('w') as f:
+        f.write('[\n') #start of the json file
         if save_video:
-            video_writer.write(bgr_image)
+            for _, _, im0s, _, frame_idx in dataset:
+                height, width, _ = im0s.shape
+                break
+            size = (width, height)
+            fourcc = cv2.VideoWriter_fourcc(*'vp80')
+            video_writer = cv2.VideoWriter(str(dir_path / Path("out.webm")), fourcc, fps, size)
+        for _, img, im0s, _, frame_idx in tqdm(dataset):
+            if debug_frames > 0 and frame_idx > debug_frames:
+                break
 
 
-    if save_video:
-        video_writer.release()
+            img = torch.from_numpy(img).to(device)
+            img = img.half() if half else img.float()  # uint8 to fp16/32
+            img /= 255.0  # 0 - 255 to 0.0 - 1.0
+            if img.ndimension() == 3:
+                img = img.unsqueeze(0)
 
-    num_idx = len(queue_time)
-    avg_queue_time = sum(queue_time.values()) / num_idx if num_idx > 0 else 0
-    print(queue_time)
-    print(avg_queue_time)
+            bgr_image = im0s
+
+
+            results = model(img)[0]
+            results = utils.non_max_suppression(results, conf_thres, iou_thres)
+            if(results[0].shape[0]==0):
+                continue
+
+            det = results[0]
+            det[:, :4] = utils.scale_coords(img.shape[2:], det[:, :4], im0s.shape).round()
+            person_ind = [i for i, cls in enumerate(det[:, -1]) if int(cls) == 0]
+            xyxy = det[person_ind, :-2]  # find person only
+            xywh_boxes = utils.xyxy2xywh(xyxy)
+            tlwh_boxes = utils.xywh2tlwh(xywh_boxes)
+            confidence = det[:, -2]
+            if use_gpu:
+                tlwh_boxes = tlwh_boxes.cpu()
+                xyxy = xyxy.cpu()
+            xyxy_boxes = np.array(xyxy).astype(int)
+
+            features = encoder.get_features(xyxy_boxes, bgr_image)
+
+            detections = [detection.Detection(bbox, confidence, 'person', feature) for bbox, confidence, feature in zip(tlwh_boxes, confidence, features)]
+
+            # Call the tracker
+            tracker.predict()
+            tracker.update(detections)
+
+            in_queueing_area = []
+
+            if save_img or save_video:
+                cv2.putText(bgr_image, "Queue: {}".format(str(list(queue.keys()))[1:-1]), (100, 50),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 255), 2)
+                num_idx = len(queue_time)
+                avg_queue_time = sum(queue_time.values()) / num_idx if num_idx > 0 else 0
+                cv2.putText(bgr_image, "Time: {}".format(str((queue_time))[1:-1]), (100, 150),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 255), 2)
+                cv2.putText(bgr_image, "Avg time: {}".format(str(round(avg_queue_time, 1))), (100, 100),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 255), 2)
+                pts=np.array(queue_vertices,np.int32)
+                pts = pts.reshape((-1,1,2))
+                cv2.polylines(bgr_image,[pts],True,(255,0,0), 2)
+                pts=np.array(finish_vertices,np.int32)
+                pts = pts.reshape((-1,1,2))
+                cv2.polylines(bgr_image,[pts],True,(255,255,0), 2)
+
+
+
+            for track in tracker.tracks:
+                if not track.is_confirmed() or track.time_since_update > 1:
+                    continue
+                track_id = track.track_id
+                bbox = track.to_tlbr()
+                center_x = int((bbox[0] + bbox[2]) / 2)
+                center_y = int((bbox[1] + bbox[3]) / 2)
+                cv2.putText(bgr_image, "ID: " + str(track_id), (int(center_x), int(center_y)), 0,
+                        1e-3 * bgr_image.shape[0], (255, 0, 0), 1)
+                if queue_polygon.intersects(Point(center_x, center_y)):
+                    if track_id in list(potential_queue.keys()):
+                        start_frame = potential_queue[track_id].start_frame
+                        potential_queue[track_id].accumulated_frames += 1
+                        accumulated_frames = potential_queue[track_id].accumulated_frames
+                        elapse_frames = frame_idx -  start_frame
+                        if elapse_frames > enqueue_thres * fps and accumulated_frames > elapse_frames * 0.8:
+                            queue[track_id] = Queuer(start_frame, (center_x, center_y), start_frame, False, None)
+                            in_queueing_area.append(track_id)
+                            del potential_queue[track_id]
+                        if save_video:
+                            cv2.rectangle(bgr_image, (int(bbox[0]), int(bbox[1])), (int(bbox[2]), int(bbox[3])), (0, 255, 0), 2)
+                            cv2.putText(bgr_image, str(round((frame_idx -  start_frame)/fps, 1)), (int(center_x), int(bbox[1])), 0,
+                                        1e-3 * bgr_image.shape[0], (0, 255, 0), 1)
+                    elif track_id in queue:
+                        if not queue[track_id].enter_finish_area_frame:
+                            queue[track_id].last_frame = frame_idx
+                        queue[track_id].position = (center_x, center_y)
+                        in_queueing_area.append(track_id)
+                        if save_video:
+                            cv2.rectangle(bgr_image, (int(bbox[0]), int(bbox[1])), (int(bbox[2]), int(bbox[3])), (0, 0, 255), 2)
+                            cv2.putText(bgr_image, str(round((frame_idx -  queue[track_id].start_frame)/fps, 1)), (int(center_x), int(bbox[1])), 0,
+                                        1e-3 * bgr_image.shape[0], (0, 0, 255), 1)
+                    else:
+                        addToPotential = True
+                        '''
+                        for queue_track_id in queue:
+                            (center_x2, center_y2) = queue[queue_track_id].position
+                            if abs(center_x-center_x2) + abs(center_y-center_y2) < identity_switch_thres:
+                                queue[track_id] = queue[queue_track_id]
+                                addToPotential = False
+                                del queue[queue_track_id]
+                                break
+                        '''
+                        if addToPotential:
+                            potential_queue[track_id] = PotentialQueuer(frame_idx, 0)
+
+            for track_id in list(queue.keys()):
+                queueing_time = round((queue[track_id].last_frame - queue[track_id].start_frame) / fps, 1)
+                queue_time[track_id] = queueing_time
+                if not queue[track_id].enter_finish_area_frame and finish_polyogn.intersects(Point(queue[track_id].position)):
+                    queue[track_id].enter_finish_area_frame = frame_idx
+                if queue[track_id].enter_finish_area_frame and not queue[track_id].finish_queueing:
+                    inside_finish_area_time = (frame_idx - queue[track_id].enter_finish_area_frame) / fps
+                    if inside_finish_area_time > finish_thres:
+                        queue[track_id].finish_queueing = True
+                if track_id not in in_queueing_area and (frame_idx - queue[track_id].last_frame) / fps > dequeue_thres:
+                    '''
+                    if queue[track_id].finish_queueing:
+                        queueing_time = (queue[track_id].last_frame - queue[track_id].start_frame) / fps
+                        queue_time[track_id] = queueing_time
+                    '''
+                    del queue_time[track_id]
+                    del queue[track_id]
+
+            f.write('[')
+            f.write(str(frame_idx // fps))
+            f.write(",")
+            f.write(str(len(queue_time)))
+            f.write(",")
+            f.write(str(sum(queue_time.values()) / num_idx if num_idx > 0 else 0))
+            f.write("],\n")
+
+            if save_video:
+                video_writer.write(bgr_image)
+
+        if save_video:
+            video_writer.release()
+
+        num_idx = len(queue_time)
+        avg_queue_time = sum(queue_time.values()) / num_idx if num_idx > 0 else 0
+        print(queue_time)
+        print(avg_queue_time)
+        f.write(']\n')  # end of the json file
+
+    with p.open('r') as change:
+        lines = change.readlines()
+        lines[-2] = lines[-2].replace('],', ']')
+    with p.open('w') as f:
+        f.writelines(lines)
+
 
 def parse_opt():
     parser = argparse.ArgumentParser()
