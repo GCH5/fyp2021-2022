@@ -85,7 +85,7 @@ def run(
                 height, width, _ = im0s.shape
                 break
             size = (width, height)
-            fourcc = cv2.VideoWriter_fourcc("H", "2", "6", "4")
+            fourcc = cv2.VideoWriter_fourcc(*"avc1")
             video_writer = cv2.VideoWriter(
                 str(dir_path / Path("out.mp4")), fourcc, fps, size
             )
