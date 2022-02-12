@@ -139,12 +139,11 @@ def upload_file():
         source=filepath,
         finish_area=Area.finish_polygon,
         queue_polygon=Area.queue_polygon,
-        device="cpu",
+        device="0",
         save_video=True,
-        debug_frames=61,
     )
 
-    outputVideoName = "./out/out.webm"
+    outputVideoName = "./out/out.mp4"
     outputJsonName = "./out/output.json"
 
     json_size = getsize(outputJsonName)

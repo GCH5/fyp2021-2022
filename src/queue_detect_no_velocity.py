@@ -85,9 +85,9 @@ def run(
                 height, width, _ = im0s.shape
                 break
             size = (width, height)
-            fourcc = cv2.VideoWriter_fourcc(*"vp80")
+            fourcc = cv2.VideoWriter_fourcc("H", "2", "6", "4")
             video_writer = cv2.VideoWriter(
-                str(dir_path / Path("out.webm")), fourcc, fps, size
+                str(dir_path / Path("out.mp4")), fourcc, fps, size
             )
         for _, img, im0s, _, frame_idx in tqdm(dataset):
             if debug_frames > 0 and frame_idx > debug_frames:
