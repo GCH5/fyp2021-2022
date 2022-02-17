@@ -1,7 +1,7 @@
 import os
-import uuid
-from flask import Flask, flash, request, redirect, render_template, url_for, jsonify
-from werkzeug.utils import secure_filename
+from typing import Dict
+import logging
+from flask import Flask, request, jsonify, after_this_request
 from os.path import getsize
 from flask_cors import cross_origin
 import queue_detect_no_velocity
@@ -18,28 +18,31 @@ CHUNK_SIZE = 8192
 
 
 class Area:
-    queue_polygon = []
-    finish_polygon = []
-    uid = 0
+    def __init__(self, uid):
+        self.queue_polygon = []
+        self.finish_polygon = []
+        self.uid = uid
 
+
+requests: Dict[str, Area] = {}
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0")
 
 
 def read_file_chunks(outputVideoName, outputJsonName):
+    logging.debug("reading json file")
     with open(outputJsonName, "rb") as fd:
         while True:
             buf = fd.read(CHUNK_SIZE)
-            print("reading json file")
             if buf:
                 yield buf
             else:
                 break
+    logging.debug("reading video file")
     with open(outputVideoName, "rb") as fd:
         while True:
             buf = fd.read(CHUNK_SIZE)
-            # print("reading video file")
             if buf:
                 yield buf
             else:
@@ -50,72 +53,43 @@ def allowed_file(filename):
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
 
 
-@app.route("/", methods=["GET", "POST"])
-def upload():
-    if request.method == "GET":
-        return render_template("base.html")
-
-    #     if request.method == 'POST':
-    #         # check if the post request has the file part
-    #         if 'file' not in request.files:
-    #             flash('No file part')
-    #             return redirect(request.url)
-    #         file = request.files['file']
-    # D        # If the user does not select a file, the browser submits an
-    #         # empty file without a filename.
-    #         if file.filename == '':
-    #             flash('No selected file')
-    #
-    #         if file:
-    #             filename = secure_filename(file.filename)
-    #             filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-    #             file.save(filepath)
-    # server_main.run(source=filepath, save_img=True, device='cpu', output_dir=OUTPUT_DIR)
-    # result = read_result()
-    # os.remove(filepath)
-    # res = first_frame(filepath)
-    # return render_template('base.html', data=result[1][-1], pic=draw_pic(result[0], result[1]))
-    return render_template("base.html", pic=res)
-    # return render_template('base.html')
-
-
 @app.route("/upload", methods=["POST"])
 @cross_origin(expose_headers="json-size")
 def upload_file():
-    @after_this_request
-    def remove_file(response):
-        try:
-            os.remove(filepath)
-        except Exception as error:
-            app.logger.error("Error removing or closing downloaded file handle", error)
-        return response
+    logging.info(request.files)
+    try:
+        file = request.files["video"]
+        basename, ext = os.path.splitext(file.filename)
+        uid = basename
+        filename = uid + ext
+        if not os.path.exists(app.config["UPLOAD_FOLDER"]):
+            os.makedirs(app.config["UPLOAD_FOLDER"])
+        upload_file_path = os.path.join(app.config["UPLOAD_FOLDER"], filename)
+        file.save(upload_file_path)
+    except Exception as error:
+        app.logger.error("Error removing or closing downloaded file handle", error)
+        return jsonify(status=400)
 
-    print(request.files)
-    if request.method == "POST":
-        if "video" in request.files:
-            file = request.files["video"]
-            filename = str(uuid.uuid4()) + "_" + secure_filename(file.filename)
-            if not os.path.exists(app.config["UPLOAD_FOLDER"]):
-                os.makedirs(app.config["UPLOAD_FOLDER"])
-            filepath = os.path.join(app.config["UPLOAD_FOLDER"], filename)
-            file.save(filepath)
     """
     pass the uploaded video and parameters to the pytorch model
     generate output.mp4 and output.json
     """
-    print(Area.queue_polygon)
-    print(Area.finish_polygon)
+    logging.info(requests)
+    requestArea = requests[uid]
+    logging.debug(requestArea.queue_polygon)
+    logging.debug(requestArea.finish_polygon)
     queue_detect_no_velocity.run(
         weights="../yolo_head_detection.pt",
-        source=filepath,
-        finish_area=Area.finish_polygon,
-        queue_polygon=Area.queue_polygon,
+        source=upload_file_path,
+        output_filename=uid,
+        finish_area=requestArea.finish_polygon,
+        queue_polygon=requestArea.queue_polygon,
         device="0",
         save_video=True,
     )
-
-    outputVideoName = "./out/out.mp4"
-    outputJsonName = "./out/output.json"
+    os.remove(upload_file_path)
+    outputVideoName = os.path.join(OUTPUT_DIR, uid + ".mp4")
+    outputJsonName = os.path.join(OUTPUT_DIR, uid + ".json")
 
     json_size = getsize(outputJsonName)
     response = app.response_class(
@@ -123,26 +97,46 @@ def upload_file():
         mimetype="application/octet-stream",
     )
     response.headers["json-size"] = json_size
-    print(json_size)
-    print("return response success")
+    logging.debug(json_size)
+
+    @after_this_request
+    def remove_output(response):
+        logging.debug("remove output files")
+        del requests[uid]
+        return response
+
     return response
 
 
 @app.route("/params", methods=["POST"])
 @cross_origin()
 def uploadParams():
-    print(request)
+    outputFiles = os.listdir(OUTPUT_DIR)
+    uids = set(map(lambda filename: os.path.splitext(filename)[0], outputFiles))
+    for uid in uids:
+        if uid not in requests:
+            outputVideoName = os.path.join(OUTPUT_DIR, uid + ".mp4")
+            outputJsonName = os.path.join(OUTPUT_DIR, uid + ".json")
+            logging.debug(f"remove output files with uid: {uid}")
+            os.remove(outputVideoName)
+            os.remove(outputJsonName)
+    logging.debug(request)
     if request.method == "POST":
-        print(request.json)
-        Area.queue_polygon.clear()
-        Area.finish_polygon.clear()
-        Area.uid = request.json["videoUid"]
+        logging.info(request.json)
+        uid = str(request.json["videoUid"])
+        if uid in requests:
+            requestArea = requests[uid]
+        else:
+            requestArea = Area(uid)
+        requestArea.queue_polygon.clear()
+        requestArea.finish_polygon.clear()
         qaPoints = request.json["queueAreaPoints"]
         faPoints = request.json["finishAreaPoints"]
         for point in qaPoints:
-            Area.queue_polygon.append(point[0])
-            Area.queue_polygon.append(point[1])
+            requestArea.queue_polygon.append(point[0])
+            requestArea.queue_polygon.append(point[1])
         for point in faPoints:
-            Area.finish_polygon.append(point[0])
-            Area.finish_polygon.append(point[1])
+            requestArea.finish_polygon.append(point[0])
+            requestArea.finish_polygon.append(point[1])
+        requests[uid] = requestArea
         return jsonify(succuss=True, status=200)
