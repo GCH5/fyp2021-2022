@@ -7,7 +7,6 @@ from tqdm import tqdm
 import torch
 from shapely.geometry import Polygon
 from shapely.geometry import Point
-import datetime
 from deep_sort.tracker import Tracker
 from deep_sort import nn_matching
 from my_utils.encoder_torch import Extractor
@@ -16,15 +15,19 @@ from my_utils.my_dataset import LoadImages
 from my_utils import utils
 from deep_sort import detection
 from my_utils.queuer import Queuer, PotentialQueuer
+import logging
 
 fps = 60
 identity_switch_thres = 30
+
+logging.basicConfig(filename="queue_detect.log", level=logging.DEBUG)
 
 
 def run(
     weights="yolov5l.pt",  # model.pt path(s)
     source="frames",  # file/dir/URL/glob, 0 for webcam
     output_dir="out",
+    output_filename="out",
     finish_area=[866, 650, 1172, 473, 1281, 555, 990, 776],
     device="cpu",  # cuda device, i.e. 0 or 0,1,2,3 or cpu
     conf_thres=0.5,  # confidence threshold
@@ -39,43 +42,46 @@ def run(
     save_img=False,
     save_video=False,
 ):
-
+    logging.debug("✈Start queue analysis✈")
     queue_vertices = []
     for x, y in zip(*[iter(queue_polygon)] * 2):  # loop 2 coords at a time
         queue_vertices.append((x, y))
     queue_polygon = Polygon(queue_vertices)
+    logging.debug("queue_polygon loaded")
     finish_vertices = []
     for x, y in zip(*[iter(finish_area)] * 2):  # loop 2 coords at a time
         finish_vertices.append((x, y))
     finish_polyogn = Polygon(finish_vertices)
+    logging.debug("finish_polyogn loaded")
 
     device = utils.select_device(device)
     use_gpu = device == torch.device("cuda:0")
-    print(device)
+    logging.debug(device)
     half &= device.type != "cpu"  # half precision only supported on CUDA
 
     model = attempt_load(weights, map_location=device)  # load FP32 model
+    logging.debug("model loaded")
     stride = int(model.stride.max())  # model stride
     if half:
         model.half()
 
     encoder = Extractor(str(Path("../model") / Path("ckpt.t7")))
+    logging.debug("Loading encoder")
     max_cosine_distance = 0.2
     nn_budget = None
-
     metric = nn_matching.NearestNeighborDistanceMetric(
         "cosine", max_cosine_distance, nn_budget
     )
     tracker = Tracker(metric)
     dataset = LoadImages(source, img_size=640, stride=stride)
 
-    avg_queue_time = 0.0
+    last_waiting_time = 0.0
     queue = {}
     potential_queue = {}
     queue_time = {}
 
     dir_path = Path(output_dir)
-    file_path = Path("output.json")
+    file_path = Path(f"{output_filename}.json")
     dir_path.mkdir(exist_ok=True)
     p = Path(output_dir) / file_path
     with p.open("w") as f:
@@ -87,7 +93,7 @@ def run(
             size = (width, height)
             fourcc = cv2.VideoWriter_fourcc(*"avc1")
             video_writer = cv2.VideoWriter(
-                str(dir_path / Path("out.mp4")), fourcc, fps, size
+                str(dir_path / Path(f"{output_filename}.mp4")), fourcc, fps, size
             )
         for _, img, im0s, _, frame_idx in tqdm(dataset):
             if debug_frames > 0 and frame_idx > debug_frames:
@@ -133,37 +139,41 @@ def run(
             tracker.update(detections)
 
             in_queueing_area = []
-
             if save_img or save_video:
                 cv2.putText(
                     bgr_image,
-                    "Queue: {}".format(str(list(queue.keys()))[1:-1]),
+                    "Queue length: {}".format(str(list(queue.keys()))[1:-1]),
                     (100, 50),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     1.0,
-                    (0, 255, 255),
-                    2,
-                )
-                num_idx = len(queue_time)
-                avg_queue_time = (
-                    sum(queue_time.values()) / num_idx if num_idx > 0 else 0
-                )
-                cv2.putText(
-                    bgr_image,
-                    "Time: {}".format(str((queue_time))[1:-1]),
-                    (100, 150),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    1.0,
-                    (0, 255, 255),
+                    (49, 49, 247),
                     2,
                 )
                 cv2.putText(
                     bgr_image,
-                    "Avg time: {}".format(str(round(avg_queue_time, 1))),
+                    "ID: {}".format(str(list(queue.keys()))[1:-1]),
                     (100, 100),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     1.0,
-                    (0, 255, 255),
+                    (49, 49, 247),
+                    2,
+                )
+                cv2.putText(
+                    bgr_image,
+                    "Last waiting time: {}".format(str(round(last_waiting_time, 1))),
+                    (100, 150),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    1.0,
+                    (49, 49, 247),
+                    2,
+                )
+                cv2.putText(
+                    bgr_image,
+                    "ID, time elapsed: {}".format(str((queue_time))[1:-1]),
+                    (100, 200),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    1.0,
+                    (49, 49, 247),
                     2,
                 )
                 pts = np.array(queue_vertices, np.int32)
@@ -297,15 +307,17 @@ def run(
                         queueing_time = (queue[track_id].last_frame - queue[track_id].start_frame) / fps
                         queue_time[track_id] = queueing_time
                     """
+                    last_waiting_time = queue_time[track_id]
                     del queue_time[track_id]
                     del queue[track_id]
 
             f.write("[")
             f.write(str(frame_idx // fps))
             f.write(",")
+            """write queue length"""
             f.write(str(len(queue_time)))
             f.write(",")
-            f.write(str(sum(queue_time.values()) / num_idx if num_idx > 0 else 0))
+            f.write(str(last_waiting_time))
             f.write("],\n")
 
             if save_video:
@@ -314,10 +326,8 @@ def run(
         if save_video:
             video_writer.release()
 
-        num_idx = len(queue_time)
-        avg_queue_time = sum(queue_time.values()) / num_idx if num_idx > 0 else 0
-        print(queue_time)
-        print(avg_queue_time)
+        logging.debug(queue_time)
+        logging.debug(last_waiting_time)
         f.write("]\n")  # end of the json file
 
     with p.open("r") as change:
