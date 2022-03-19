@@ -4,17 +4,32 @@ import logging
 from flask import Flask, request, jsonify, after_this_request
 from os.path import getsize
 from flask_cors import cross_origin
+
+# from CounTr_code import crowd_counting_infer
 import queue_detect_no_velocity
 
-UPLOAD_FOLDER = "upload"
-OUTPUT_DIR = "out"
+QUEUE_ANALYSIS_UPLOAD_FOLDER = "queue_analysis_upload"
+QUEUE_ANALYSIS_OUTPUT_DIR = "queue_analysis_out"
+
+CROWD_COUNTING_UPLOAD_FOLDER = "crowd_counting_upload"
+CROWD_COUNTING_OUTPUT_DIR = "crowd_counting_out"
 
 ALLOWED_EXTENSIONS = {"mp4", "avi", "json"}
 
 app = Flask(__name__)
-app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
+app.config["QUEUE_ANALYSIS_UPLOAD_FOLDER"] = QUEUE_ANALYSIS_UPLOAD_FOLDER
+app.config["CROWD_COUNTING_UPLOAD_FOLDER"] = CROWD_COUNTING_UPLOAD_FOLDER
 app.config["DEBUG"] = True
 CHUNK_SIZE = 8192
+
+if not os.path.exists(QUEUE_ANALYSIS_UPLOAD_FOLDER):
+    os.makedirs(QUEUE_ANALYSIS_UPLOAD_FOLDER)
+if not os.path.exists(QUEUE_ANALYSIS_OUTPUT_DIR):
+    os.makedirs(QUEUE_ANALYSIS_OUTPUT_DIR)
+if not os.path.exists(CROWD_COUNTING_UPLOAD_FOLDER):
+    os.makedirs(CROWD_COUNTING_UPLOAD_FOLDER)
+if not os.path.exists(CROWD_COUNTING_OUTPUT_DIR):
+    os.makedirs(CROWD_COUNTING_OUTPUT_DIR)
 
 
 class Area:
@@ -53,18 +68,20 @@ def allowed_file(filename):
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
 
 
-@app.route("/upload", methods=["POST"])
+@app.route("/queue-analysis/video-upload", methods=["POST"])
 @cross_origin(expose_headers="json-size")
-def upload_file():
+def queue_analysis_upload_video():
     logging.info(request.files)
     try:
         file = request.files["video"]
         basename, ext = os.path.splitext(file.filename)
         uid = basename
         filename = uid + ext
-        if not os.path.exists(app.config["UPLOAD_FOLDER"]):
-            os.makedirs(app.config["UPLOAD_FOLDER"])
-        upload_file_path = os.path.join(app.config["UPLOAD_FOLDER"], filename)
+        if not os.path.exists(app.config["QUEUE_ANALYSIS_UPLOAD_FOLDER"]):
+            os.makedirs(app.config["QUEUE_ANALYSIS_UPLOAD_FOLDER"])
+        upload_file_path = os.path.join(
+            app.config["QUEUE_ANALYSIS_UPLOAD_FOLDER"], filename
+        )
         file.save(upload_file_path)
     except Exception as error:
         app.logger.error("Error removing or closing downloaded file handle", error)
@@ -88,8 +105,8 @@ def upload_file():
         save_video=True,
     )
     os.remove(upload_file_path)
-    outputVideoName = os.path.join(OUTPUT_DIR, uid + ".mp4")
-    outputJsonName = os.path.join(OUTPUT_DIR, uid + ".json")
+    outputVideoName = os.path.join(QUEUE_ANALYSIS_OUTPUT_DIR, uid + ".mp4")
+    outputJsonName = os.path.join(QUEUE_ANALYSIS_OUTPUT_DIR, uid + ".json")
 
     json_size = getsize(outputJsonName)
     response = app.response_class(
@@ -101,22 +118,68 @@ def upload_file():
 
     @after_this_request
     def remove_output(response):
-        logging.debug("remove output files")
+        logging.debug("remove requests id")
         del requests[uid]
         return response
 
     return response
 
 
-@app.route("/params", methods=["POST"])
+@app.route("/crowd-counting/video-upload", methods=["POST"])
+@cross_origin(expose_headers="json-size")
+def crowd_counting_upload_video():
+    logging.info(request.files)
+    try:
+        file = request.files["video"]
+        basename, ext = os.path.splitext(file.filename)
+        uid = basename
+        filename = uid + ext
+        if not os.path.exists(app.config["CROWD_COUNTING_UPLOAD_FOLDER"]):
+            os.makedirs(app.config["CROWD_COUNTING_UPLOAD_FOLDER"])
+        upload_file_path = os.path.join(
+            app.config["CROWD_COUNTING_UPLOAD_FOLDER"], filename
+        )
+        file.save(upload_file_path)
+    except Exception as error:
+        app.logger.error("Error removing or closing downloaded file handle", error)
+        return jsonify(status=400)
+
+    """
+    pass the uploaded video and parameters to the pytorch model
+    generate crowd_counting_output.mp4 and crowd_counting_output.json
+    """
+    logging.info(requests)
+    crowd_counting_infer.run(
+        source=upload_file_path,
+        output_dir="crowd_counting_out",
+        output_filename=uid,
+        device="0",
+        save_video=True,
+    )
+    os.remove(upload_file_path)
+    outputVideoName = os.path.join(CROWD_COUNTING_OUTPUT_DIR, uid + ".mp4")
+    outputJsonName = os.path.join(CROWD_COUNTING_OUTPUT_DIR, uid + ".json")
+
+    json_size = getsize(outputJsonName)
+    response = app.response_class(
+        read_file_chunks(outputVideoName, outputJsonName),
+        mimetype="application/octet-stream",
+    )
+    response.headers["json-size"] = json_size
+    logging.debug(json_size)
+
+    return response
+
+
+@app.route("/queue-analysis/params", methods=["POST"])
 @cross_origin()
-def uploadParams():
-    outputFiles = os.listdir(OUTPUT_DIR)
+def queue_analysis_upload_params():
+    outputFiles = os.listdir(QUEUE_ANALYSIS_OUTPUT_DIR)
     uids = set(map(lambda filename: os.path.splitext(filename)[0], outputFiles))
     for uid in uids:
         if uid not in requests:
-            outputVideoName = os.path.join(OUTPUT_DIR, uid + ".mp4")
-            outputJsonName = os.path.join(OUTPUT_DIR, uid + ".json")
+            outputVideoName = os.path.join(QUEUE_ANALYSIS_OUTPUT_DIR, uid + ".mp4")
+            outputJsonName = os.path.join(QUEUE_ANALYSIS_OUTPUT_DIR, uid + ".json")
             logging.debug(f"remove output files with uid: {uid}")
             os.remove(outputVideoName)
             os.remove(outputJsonName)

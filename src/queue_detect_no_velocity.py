@@ -11,7 +11,7 @@ from deep_sort.tracker import Tracker
 from deep_sort import nn_matching
 from my_utils.encoder_torch import Extractor
 from models.experimental import attempt_load
-from my_utils.my_dataset import LoadImages
+from my_utils.my_dataset import LoadImages, LoadStreams
 from my_utils import utils
 from deep_sort import detection
 from my_utils.queuer import Queuer, PotentialQueuer
@@ -20,14 +20,15 @@ import logging
 fps = 60
 identity_switch_thres = 30
 
-logging.basicConfig(filename="queue_detect.log", level=logging.DEBUG)
+logging.basicConfig(filename="queue_analysis.log", level=logging.DEBUG)
 
 
 def run(
     weights="yolov5l.pt",  # model.pt path(s)
     source="frames",  # file/dir/URL/glob, 0 for webcam
-    output_dir="out",
-    output_filename="out",
+    output_dir="queue_analysis_out",
+    sample_rate=15,
+    output_filename="queue_analysis_out",
     finish_area=[866, 650, 1172, 473, 1281, 555, 990, 776],
     device="cpu",  # cuda device, i.e. 0 or 0,1,2,3 or cpu
     conf_thres=0.5,  # confidence threshold
@@ -73,13 +74,18 @@ def run(
         "cosine", max_cosine_distance, nn_budget
     )
     tracker = Tracker(metric)
-    dataset = LoadImages(source, img_size=640, stride=stride)
+    is_url = source.lower().startswith(("rtsp://", "rtmp://", "http://", "https://"))
+    if is_url:
+        dataset = LoadStreams(source, img_size=640, stride=stride)
+    else:
+        dataset = LoadImages(source, img_size=640, stride=stride)
 
     last_waiting_time = 0.0
     queue = {}
     potential_queue = {}
     queue_time = {}
-
+    sample_count = 2
+    num_frames_per_sample = fps / sample_rate  # 60 / 30 = 2
     dir_path = Path(output_dir)
     file_path = Path(f"{output_filename}.json")
     dir_path.mkdir(exist_ok=True)
@@ -106,37 +112,51 @@ def run(
                 img = img.unsqueeze(0)
 
             bgr_image = im0s
+            video_data = np.random.randint(
+                1, 254, (bgr_image.shape[0], bgr_image.shape[1], 3)
+            ).astype(np.uint8)
+            print(video_data.shape)
+            print("Size: ", size)
+            video_writer.write(video_data)
+            continue
+            if (
+                frame_idx >= num_frames_per_sample * sample_count
+                and frame_idx <= num_frames_per_sample * (sample_count + 1)
+            ):
+                sample_count += 1
 
-            results = model(img)[0]
-            results = utils.non_max_suppression(results, conf_thres, iou_thres)
-            if results[0].shape[0] == 0:
-                video_writer.write(bgr_image)
-                continue
+                results = model(img)[0]
+                results = utils.non_max_suppression(results, conf_thres, iou_thres)
+                if results[0].shape[0] == 0:
+                    video_writer.write(bgr_image)
+                    continue
 
-            det = results[0]
-            det[:, :4] = utils.scale_coords(
-                img.shape[2:], det[:, :4], im0s.shape
-            ).round()
-            person_ind = [i for i, cls in enumerate(det[:, -1]) if int(cls) == 0]
-            xyxy = det[person_ind, :-2]  # find person only
-            xywh_boxes = utils.xyxy2xywh(xyxy)
-            tlwh_boxes = utils.xywh2tlwh(xywh_boxes)
-            confidence = det[:, -2]
-            if use_gpu:
-                tlwh_boxes = tlwh_boxes.cpu()
-                xyxy = xyxy.cpu()
-            xyxy_boxes = np.array(xyxy).astype(int)
+                det = results[0]
+                det[:, :4] = utils.scale_coords(
+                    img.shape[2:], det[:, :4], im0s.shape
+                ).round()
+                person_ind = [i for i, cls in enumerate(det[:, -1]) if int(cls) == 0]
+                xyxy = det[person_ind, :-2]  # find person only
+                xywh_boxes = utils.xyxy2xywh(xyxy)
+                tlwh_boxes = utils.xywh2tlwh(xywh_boxes)
+                confidence = det[:, -2]
+                if use_gpu:
+                    tlwh_boxes = tlwh_boxes.cpu()
+                    xyxy = xyxy.cpu()
+                xyxy_boxes = np.array(xyxy).astype(int)
 
-            features = encoder.get_features(xyxy_boxes, bgr_image)
+                features = encoder.get_features(xyxy_boxes, bgr_image)
 
-            detections = [
-                detection.Detection(bbox, confidence, "person", feature)
-                for bbox, confidence, feature in zip(tlwh_boxes, confidence, features)
-            ]
+                detections = [
+                    detection.Detection(bbox, confidence, "person", feature)
+                    for bbox, confidence, feature in zip(
+                        tlwh_boxes, confidence, features
+                    )
+                ]
 
-            # Call the tracker
-            tracker.predict()
-            tracker.update(detections)
+                # Call the tracker
+                tracker.predict()
+                tracker.update(detections)
 
             in_queueing_area = []
             if save_img or save_video:
