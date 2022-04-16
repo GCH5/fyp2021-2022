@@ -1,12 +1,14 @@
 import os
 from typing import Dict
 import logging
-from flask import Flask, request, jsonify, after_this_request
+from flask import Flask, request, jsonify, after_this_request, stream_with_context
 from os.path import getsize
 from flask_cors import cross_origin
+import json
 
 # from CounTr_code import crowd_counting_infer
-import queue_detect_no_velocity
+import queue_analysis_static
+import queue_analysis_live
 
 QUEUE_ANALYSIS_UPLOAD_FOLDER = "queue_analysis_upload"
 QUEUE_ANALYSIS_OUTPUT_DIR = "queue_analysis_out"
@@ -40,6 +42,7 @@ class Area:
 
 
 requests: Dict[str, Area] = {}
+liveAnalysisInstance: Dict[str, queue_analysis_live.QueueAnalysis] = {}
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0")
@@ -94,8 +97,8 @@ def queue_analysis_upload_video():
     logging.info(requests)
     requestArea = requests[uid]
     logging.debug(requestArea.queue_polygon)
-    logging.debug(requestArea.finish_polygon)
-    queue_detect_no_velocity.run(
+    logging.debug(f"finish polygon: {requestArea.finish_polygon}")
+    queue_analysis_static.run(
         weights="../yolo_head_detection.pt",
         source=upload_file_path,
         output_filename=uid,
@@ -104,6 +107,7 @@ def queue_analysis_upload_video():
         device="0",
         save_video=True,
     )
+    print("analysis finished")
     os.remove(upload_file_path)
     outputVideoName = os.path.join(QUEUE_ANALYSIS_OUTPUT_DIR, uid + ".mp4")
     outputJsonName = os.path.join(QUEUE_ANALYSIS_OUTPUT_DIR, uid + ".json")
@@ -149,6 +153,7 @@ def crowd_counting_upload_video():
     generate crowd_counting_output.mp4 and crowd_counting_output.json
     """
     logging.info(requests)
+    """
     crowd_counting_infer.run(
         source=upload_file_path,
         output_dir="crowd_counting_out",
@@ -156,6 +161,7 @@ def crowd_counting_upload_video():
         device="0",
         save_video=True,
     )
+    """
     os.remove(upload_file_path)
     outputVideoName = os.path.join(CROWD_COUNTING_OUTPUT_DIR, uid + ".mp4")
     outputJsonName = os.path.join(CROWD_COUNTING_OUTPUT_DIR, uid + ".json")
@@ -203,3 +209,51 @@ def queue_analysis_upload_params():
             requestArea.finish_polygon.append(point[1])
         requests[uid] = requestArea
         return jsonify(succuss=True, status=200)
+
+
+def hashcode(string):
+    hash = 0
+    if len(string) == 0:
+        return hash
+    for index in range(len(string)):
+        chr = ord(string[index])
+        hash = ((hash << 5) - hash) + chr
+        hash |= 0  # Convert to 32bit integer
+    return hash
+
+
+@app.route("/queue-analysis/live", methods=["GET"])
+@cross_origin()
+def listen():
+    uid = request.args.get("streamUid")
+    print(liveAnalysisInstance[uid])
+    logging.info("start listening with id: " + uid)
+    return app.response_class(
+        stream_with_context(liveAnalysisInstance[uid].run()),
+        mimetype="text/event-stream",
+    )
+
+
+@app.route("/queue-analysis/close", methods=["POST"])
+@cross_origin()
+def closeConnection():
+    uid = str(request.json["streamUid"])
+    del liveAnalysisInstance[uid]
+    logging.info("close connection with id: " + uid)
+    return jsonify(succuss=True, status=200)
+
+
+@app.route("/queue-analysis/register", methods=["POST"])
+@cross_origin()
+def register():
+    logging.debug("register")
+    uid = str(request.json["streamUid"])
+    queueAnalysisInstance = queue_analysis_live.QueueAnalysis(
+        weights="../yolo_head_detection.pt",
+        source=request.json["streamUrl"],
+        finish_area=request.json["finishAreaPoints"],
+        queue_polygon=request.json["queueAreaPoints"],
+        device="0",
+    )
+    liveAnalysisInstance[uid] = queueAnalysisInstance
+    return jsonify(succuss=True, status=200)

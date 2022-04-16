@@ -8,51 +8,68 @@ from pathlib import Path
 import numpy as np
 import torch
 import torchvision
+import re
 
 
 logger = logging.getLogger(__name__)
 
+
 def date_modified(path=__file__):
     # return human-readable file modification date, i.e. '2021-3-26'
     t = datetime.datetime.fromtimestamp(Path(path).stat().st_mtime)
-    return f'{t.year}-{t.month}-{t.day}'
+    return f"{t.year}-{t.month}-{t.day}"
 
 
 def git_describe(path=Path(__file__).parent):  # path must be a directory
     # return human-readable git description, i.e. v5.0-5-g3e25f1e https://git-scm.com/docs/git-describe
-    s = f'git -C {path} describe --tags --long --always'
+    s = f"git -C {path} describe --tags --long --always"
     try:
-        return subprocess.check_output(s, shell=True, stderr=subprocess.STDOUT).decode()[:-1]
+        return subprocess.check_output(
+            s, shell=True, stderr=subprocess.STDOUT
+        ).decode()[:-1]
     except subprocess.CalledProcessError as e:
-        return ''  # not a git repository
+        return ""  # not a git repository
 
 
-def select_device(device='', batch_size=None):
+def select_device(device="", batch_size=None):
     # device = 'cpu' or '0' or '0,1,2,3'
-    s = f'YOLOv5 🚀 {git_describe() or date_modified()} torch {torch.__version__} '  # string
-    device = str(device).strip().lower().replace('cuda:', '')  # to string, 'cuda:0' to '0'
-    cpu = device == 'cpu'
+    s = f"YOLOv5 🚀 {git_describe() or date_modified()} torch {torch.__version__} "  # string
+    device = (
+        str(device).strip().lower().replace("cuda:", "")
+    )  # to string, 'cuda:0' to '0'
+    cpu = device == "cpu"
     if cpu:
-        os.environ['CUDA_VISIBLE_DEVICES'] = '-1'  # force torch.cuda.is_available() = False
+        os.environ[
+            "CUDA_VISIBLE_DEVICES"
+        ] = "-1"  # force torch.cuda.is_available() = False
     elif device:  # non-cpu device requested
-        os.environ['CUDA_VISIBLE_DEVICES'] = device  # set environment variable
-        assert torch.cuda.is_available(), f'CUDA unavailable, invalid device {device} requested'  # check availability
+        os.environ["CUDA_VISIBLE_DEVICES"] = device  # set environment variable
+        assert (
+            torch.cuda.is_available()
+        ), f"CUDA unavailable, invalid device {device} requested"  # check availability
 
     cuda = not cpu and torch.cuda.is_available()
     if cuda:
-        devices = device.split(',') if device else '0'  # range(torch.cuda.device_count())  # i.e. 0,1,6,7
+        devices = (
+            device.split(",") if device else "0"
+        )  # range(torch.cuda.device_count())  # i.e. 0,1,6,7
         n = len(devices)  # device count
         if n > 1 and batch_size:  # check batch_size is divisible by device_count
-            assert batch_size % n == 0, f'batch-size {batch_size} not multiple of GPU count {n}'
-        space = ' ' * (len(s) + 1)
+            assert (
+                batch_size % n == 0
+            ), f"batch-size {batch_size} not multiple of GPU count {n}"
+        space = " " * (len(s) + 1)
         for i, d in enumerate(devices):
             p = torch.cuda.get_device_properties(i)
             s += f"{'' if i == 0 else space}CUDA:{d} ({p.name}, {p.total_memory / 1024 ** 2}MB)\n"  # bytes to MB
     else:
-        s += 'CPU\n'
+        s += "CPU\n"
 
-    logger.info(s.encode().decode('ascii', 'ignore') if platform.system() == 'Windows' else s)  # emoji-safe
-    return torch.device('cuda:0' if cuda else 'cpu')
+    logger.info(
+        s.encode().decode("ascii", "ignore") if platform.system() == "Windows" else s
+    )  # emoji-safe
+    return torch.device("cuda:0" if cuda else "cpu")
+
 
 def clip_coords(boxes, shape):
     # Clip bounding xyxy bounding boxes to image shape (height, width)
@@ -64,12 +81,17 @@ def clip_coords(boxes, shape):
     else:  # np.array (faster grouped)
         boxes[:, [0, 2]] = boxes[:, [0, 2]].clip(0, shape[1])  # x1, x2
         boxes[:, [1, 3]] = boxes[:, [1, 3]].clip(0, shape[0])  # y1, y2
-        
+
+
 def scale_coords(img1_shape, coords, img0_shape, ratio_pad=None):
     # Rescale coords (xyxy) from img1_shape to img0_shape
     if ratio_pad is None:  # calculate from img0_shape
-        gain = min(img1_shape[0] / img0_shape[0], img1_shape[1] / img0_shape[1])  # gain  = old / new
-        pad = (img1_shape[1] - img0_shape[1] * gain) / 2, (img1_shape[0] - img0_shape[0] * gain) / 2  # wh padding
+        gain = min(
+            img1_shape[0] / img0_shape[0], img1_shape[1] / img0_shape[1]
+        )  # gain  = old / new
+        pad = (img1_shape[1] - img0_shape[1] * gain) / 2, (
+            img1_shape[0] - img0_shape[0] * gain
+        ) / 2  # wh padding
     else:
         gain = ratio_pad[0][0]
         pad = ratio_pad[1]
@@ -79,6 +101,7 @@ def scale_coords(img1_shape, coords, img0_shape, ratio_pad=None):
     coords[:, :4] /= gain
     clip_coords(coords, img0_shape)
     return coords
+
 
 def box_iou(box1, box2):
     # https://github.com/pytorch/vision/blob/master/torchvision/ops/boxes.py
@@ -101,15 +124,25 @@ def box_iou(box1, box2):
     area2 = box_area(box2.T)
 
     # inter(N,M) = (rb(N,M,2) - lt(N,M,2)).clamp(0).prod(2)
-    inter = (torch.min(box1[:, None, 2:], box2[:, 2:]) - torch.max(box1[:, None, :2], box2[:, :2])).clamp(0).prod(2)
-    return inter / (area1[:, None] + area2 - inter)  # iou = inter / (area1 + area2 - inter)
+    inter = (
+        (
+            torch.min(box1[:, None, 2:], box2[:, 2:])
+            - torch.max(box1[:, None, :2], box2[:, :2])
+        )
+        .clamp(0)
+        .prod(2)
+    )
+    return inter / (
+        area1[:, None] + area2 - inter
+    )  # iou = inter / (area1 + area2 - inter)
 
 
 def xywh2tlwh(xywh):
-  # xywh: center, w, h
-  # tlwh: top-left, w, h
-  xywh[:,:2] = xywh[:, :2] - xywh[:, 2:] / 2
-  return xywh
+    # xywh: center, w, h
+    # tlwh: top-left, w, h
+    xywh[:, :2] = xywh[:, :2] - xywh[:, 2:] / 2
+    return xywh
+
 
 def xywh2xyxy(x):
     # Convert nx4 boxes from [x, y, w, h] to [x1, y1, x2, y2] where xy1=top-left, xy2=bottom-right
@@ -119,7 +152,8 @@ def xywh2xyxy(x):
     y[:, 2] = x[:, 0] + x[:, 2] / 2  # bottom right x
     y[:, 3] = x[:, 1] + x[:, 3] / 2  # bottom right y
     return y
-    
+
+
 def xyxy2xywh(x):
     # Convert nx4 boxes from [x1, y1, x2, y2] to [x, y, w, h] where xy1=top-left, xy2=bottom-right
     y = x.clone() if isinstance(x, torch.Tensor) else np.copy(x)
@@ -129,8 +163,17 @@ def xyxy2xywh(x):
     y[:, 3] = x[:, 3] - x[:, 1]  # height
     return y
 
-def non_max_suppression(prediction, conf_thres=0.25, iou_thres=0.45, classes=None, agnostic=False, multi_label=False,
-                        labels=(), max_det=300):
+
+def non_max_suppression(
+    prediction,
+    conf_thres=0.25,
+    iou_thres=0.45,
+    classes=None,
+    agnostic=False,
+    multi_label=False,
+    labels=(),
+    max_det=300,
+):
     """Runs Non-Maximum Suppression (NMS) on inference results
 
     Returns:
@@ -141,8 +184,12 @@ def non_max_suppression(prediction, conf_thres=0.25, iou_thres=0.45, classes=Non
     xc = prediction[..., 4] > conf_thres  # candidates
 
     # Checks
-    assert 0 <= conf_thres <= 1, f'Invalid Confidence threshold {conf_thres}, valid values are between 0.0 and 1.0'
-    assert 0 <= iou_thres <= 1, f'Invalid IoU {iou_thres}, valid values are between 0.0 and 1.0'
+    assert (
+        0 <= conf_thres <= 1
+    ), f"Invalid Confidence threshold {conf_thres}, valid values are between 0.0 and 1.0"
+    assert (
+        0 <= iou_thres <= 1
+    ), f"Invalid IoU {iou_thres}, valid values are between 0.0 and 1.0"
 
     # Settings
     min_wh, max_wh = 2, 4096  # (pixels) minimum and maximum box width and height
@@ -207,34 +254,53 @@ def non_max_suppression(prediction, conf_thres=0.25, iou_thres=0.45, classes=Non
         i = torchvision.ops.nms(boxes, scores, iou_thres)  # NMS
         if i.shape[0] > max_det:  # limit detections
             i = i[:max_det]
-        if merge and (1 < n < 3E3):  # Merge NMS (boxes merged using weighted mean)
+        if merge and (1 < n < 3e3):  # Merge NMS (boxes merged using weighted mean)
             # update boxes as boxes(i,4) = weights(i,n) * boxes(n,4)
             iou = box_iou(boxes[i], boxes) > iou_thres  # iou matrix
             weights = iou * scores[None]  # box weights
-            x[i, :4] = torch.mm(weights, x[:, :4]).float() / weights.sum(1, keepdim=True)  # merged boxes
+            x[i, :4] = torch.mm(weights, x[:, :4]).float() / weights.sum(
+                1, keepdim=True
+            )  # merged boxes
             if redundant:
                 i = i[iou.sum(1) > 1]  # require redundancy
 
         output[xi] = x[i]
         if (time.time() - t) > time_limit:
-            print(f'WARNING: NMS time limit {time_limit}s exceeded')
+            print(f"WARNING: NMS time limit {time_limit}s exceeded")
             break  # time limit exceeded
 
     return output
 
+
 def ccw(A, B, C):  # 两个向量叉乘的计算公式，计数创新点
     return (C[1] - A[1]) * (B[0] - A[0]) > (B[1] - A[1]) * (C[0] - A[0])
+
 
 def intersect(A, B, C, D) -> bool:  # C,D是自己画线的两端坐标,用的是向量叉乘的思想，证明A,B在C,D两端 且 C,D在A,B两端
     return ccw(A, C, D) != ccw(B, C, D) and ccw(A, B, C) != ccw(A, B, D)
 
-def below_line(line, point): # direction from line[0] to line[1]
+
+def below_line(line, point):  # direction from line[0] to line[1]
     slope = (line[1][1] - line[0][1]) / (line[1][0] - line[0][0])
     intercept = line[1][1] - slope * line[1][0]
     return point[1] < point[0] * slope + intercept
 
-def in_box(point, box):
-    return point[0] > box[0][0] and point[0] < box[1][0] and point[1] > box[0][1] and point[1] < box[1][1]
 
-def isLeft(line,  cX, cY):
-    return ((line[2] - line[0])*(cY - line[1]) - (line[3] - line[1])*(cX - line[0])) < 0
+def in_box(point, box):
+    return (
+        point[0] > box[0][0]
+        and point[0] < box[1][0]
+        and point[1] > box[0][1]
+        and point[1] < box[1][1]
+    )
+
+
+def isLeft(line, cX, cY):
+    return (
+        (line[2] - line[0]) * (cY - line[1]) - (line[3] - line[1]) * (cX - line[0])
+    ) < 0
+
+
+def clean_str(s):
+    # Cleans a string by replacing special characters with underscore _
+    return re.sub(pattern="[|@#!¡·$€%&()=?¿^*;:,¨´><+]", repl="_", string=s)
