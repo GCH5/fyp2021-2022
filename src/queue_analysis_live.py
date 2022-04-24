@@ -1,9 +1,12 @@
-import argparse
-
+import base64
+import json
 from pathlib import Path
 import time
+import cv2
+
 import numpy as np
 import torch
+
 from shapely.geometry import Polygon
 from shapely.geometry import Point
 from deep_sort.tracker import Tracker
@@ -20,17 +23,6 @@ fps = 60
 identity_switch_thres = 30
 
 logging.basicConfig(filename="queue_analysis.log", level=logging.DEBUG)
-
-
-def test():
-    var = 1
-    while True:
-        time.sleep(1)
-        var += 1
-        print(var)
-        data = {"streamUrl": var}
-        msg = f"data: {data}\n\n"
-        yield msg
 
 
 class QueueAnalysis:
@@ -77,7 +69,7 @@ class QueueAnalysis:
         )
         self.tracker = Tracker(metric)
         self.dataset = LoadStreams(source, img_size=640, stride=stride)
-        self.last_waiting_time = 0.0
+        self.current_waiting_time = 0.0
         self.queue = {}
         self.potential_queue = {}
         self.queue_time = {}
@@ -142,15 +134,52 @@ class QueueAnalysis:
                 self.tracker.update(detections)
 
             in_queueing_area = []
-            queueLength = str(list(self.queue.keys()))[1:-1]
-            IDs = str(list(self.queue.keys()))[1:-1]
-            lastWaitingTime = str(round(self.last_waiting_time, 1))
-            IDTime = str((self.queue_time))[1:-1]
-            IDPos = {}
-            potentialQueuerTimeAndPos = []
-            potentialQueuerBox = []
-            queuerTimeAndPos = []
-            queuerBox = []
+            queueLength = len(self.queue.keys())
+            currentWaitingTime = str(round(self.current_waiting_time, 1))
+
+            cv2.putText(
+                im0s[0],
+                "Queue length: {}".format(str(list(self.queue.keys()))[1:-1]),
+                (100, 50),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1.0,
+                (49, 49, 247),
+                2,
+            )
+            cv2.putText(
+                im0s[0],
+                "ID: {}".format(str(list(self.queue.keys()))[1:-1]),
+                (100, 100),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1.0,
+                (49, 49, 247),
+                2,
+            )
+            cv2.putText(
+                im0s[0],
+                "Last waiting time: {}".format(currentWaitingTime),
+                (100, 150),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1.0,
+                (49, 49, 247),
+                2,
+            )
+            cv2.putText(
+                im0s[0],
+                "ID, time elapsed: {}".format(str((self.queue_time))[1:-1]),
+                (100, 200),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1.0,
+                (49, 49, 247),
+                2,
+            )
+            pts = np.array(self.queue_vertices, np.int32)
+            pts = pts.reshape((-1, 1, 2))
+            cv2.polylines(im0s[0], [pts], True, (255, 0, 0), 2)
+            pts = np.array(self.finish_vertices, np.int32)
+            pts = pts.reshape((-1, 1, 2))
+            cv2.polylines(im0s[0], [pts], True, (255, 255, 0), 2)
+
             for track in self.tracker.tracks:
                 if not track.is_confirmed() or track.time_since_update > 1:
                     continue
@@ -158,7 +187,15 @@ class QueueAnalysis:
                 bbox = track.to_tlbr()
                 center_x = int((bbox[0] + bbox[2]) / 2)
                 center_y = int((bbox[1] + bbox[3]) / 2)
-                IDPos[track_id] = (int(center_x), int(center_y))
+                cv2.putText(
+                    im0s[0],
+                    "ID: " + str(track_id),
+                    (int(center_x), int(center_y)),
+                    0,
+                    1e-3 * im0s[0].shape[0],
+                    (255, 0, 0),
+                    1,
+                )
                 if self.queue_polygon.intersects(Point(center_x, center_y)):
                     if track_id in list(self.potential_queue.keys()):
                         start_frame = self.potential_queue[track_id].start_frame
@@ -180,37 +217,48 @@ class QueueAnalysis:
                             )
                             in_queueing_area.append(track_id)
                             del self.potential_queue[track_id]
-                        potentialQueuerBox.append(
-                            ((int(bbox[0]), int(bbox[1])), (int(bbox[2]), int(bbox[3])))
-                        )
-                        potentialQueuerTimeAndPos.append(
-                            (
+                            cv2.rectangle(
+                                im0s[0],
+                                (int(bbox[0]), int(bbox[1])),
+                                (int(bbox[2]), int(bbox[3])),
+                                (0, 255, 0),
+                                2,
+                            )
+                            cv2.putText(
+                                im0s[0],
                                 str(round((self.frame_idx - start_frame) / fps, 1)),
                                 (int(center_x), int(bbox[1])),
+                                0,
+                                1e-3 * im0s[0].shape[0],
+                                (0, 255, 0),
+                                1,
                             )
-                        )
                     elif track_id in self.queue:
                         if not self.queue[track_id].enter_finish_area_frame:
                             self.queue[track_id].last_frame = self.frame_idx
                         self.queue[track_id].position = (center_x, center_y)
                         in_queueing_area.append(track_id)
-                        queuerBox.append(
-                            ((int(bbox[0]), int(bbox[1])), (int(bbox[2]), int(bbox[3])))
+                        cv2.rectangle(
+                            im0s[0],
+                            (int(bbox[0]), int(bbox[1])),
+                            (int(bbox[2]), int(bbox[3])),
+                            (0, 0, 255),
+                            2,
                         )
-                        queuerTimeAndPos.append(
-                            (
-                                str(
-                                    round(
-                                        (
-                                            self.frame_idx
-                                            - self.queue[track_id].start_frame
-                                        )
-                                        / fps,
-                                        1,
-                                    )
-                                ),
-                                (int(center_x), int(bbox[1])),
-                            )
+                        cv2.putText(
+                            im0s[0],
+                            str(
+                                round(
+                                    (self.frame_idx - self.queue[track_id].start_frame)
+                                    / fps,
+                                    1,
+                                )
+                            ),
+                            (int(center_x), int(bbox[1])),
+                            0,
+                            1e-3 * im0s[0].shape[0],
+                            (0, 0, 255),
+                            1,
                         )
 
                     else:
@@ -261,24 +309,22 @@ class QueueAnalysis:
                         queueing_time = (queue[track_id].last_frame - queue[track_id].start_frame) / fps
                         queue_time[track_id] = queueing_time
                     """
-                    self.last_waiting_time = self.queue_time[track_id]
+                    self.current_waiting_time = self.queue_time[track_id]
                     del self.queue_time[track_id]
                     del self.queue[track_id]
-            print(str(self.frame_idx))
+            if (self.frame_idx) % 10 != 0:
+                continue
+            _, buffer = cv2.imencode(".jpg", im0s[0])
+            jpg_as_text = base64.b64encode(buffer).decode("utf-8")
             data = {
                 "streamUrl": self.source,
-                "time": str(self.frame_idx // fps),
+                "time": round(time.time() * 1000),
                 "queueLength": queueLength,
-                "IDs": IDs,
-                "lastWaitingTime": lastWaitingTime,
-                "IDTime": IDTime,
-                "IDPos": IDPos,
-                "potentialQueuerTimeAndPos": potentialQueuerTimeAndPos,
-                "potentialQueuerBox": potentialQueuerBox,
-                "queuerTimeAndPos": queuerTimeAndPos,
-                "queuerBox": queuerBox,
+                "currentWaitingTime": currentWaitingTime,
+                "cap": jpg_as_text,
             }
-            msg = f"data: {data}\n\n"
+
+            msg = f"data: {json.dumps(data)}\n\n"
             try:
                 yield msg
             except GeneratorExit:
@@ -286,4 +332,4 @@ class QueueAnalysis:
                 break
 
         logging.debug(self.queue_time)
-        logging.debug(self.last_waiting_time)
+        logging.debug(self.current_waiting_time)

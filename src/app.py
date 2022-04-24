@@ -67,10 +67,6 @@ def read_file_chunks(outputVideoName, outputJsonName):
                 break
 
 
-def allowed_file(filename):
-    return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
-
-
 @app.route("/queue-analysis/video-upload", methods=["POST"])
 @cross_origin(expose_headers="json-size")
 def queue_analysis_upload_video():
@@ -226,7 +222,6 @@ def hashcode(string):
 @cross_origin()
 def listen():
     uid = request.args.get("streamUid")
-    print(liveAnalysisInstance[uid])
     logging.info("start listening with id: " + uid)
     return app.response_class(
         stream_with_context(liveAnalysisInstance[uid].run()),
@@ -248,11 +243,24 @@ def closeConnection():
 def register():
     logging.debug("register")
     uid = str(request.json["streamUid"])
+    qaPoints = request.json["queueAreaPoints"]
+    faPoints = request.json["finishAreaPoints"]
+    queue_polygon = []
+    finish_polygon = []
+    for point in qaPoints:
+        queue_polygon.append(point[0])
+        queue_polygon.append(point[1])
+    for point in faPoints:
+        finish_polygon.append(point[0])
+        finish_polygon.append(point[1])
+    print(queue_polygon)
+    print(finish_polygon)
+    return jsonify(succuss=True, status=200)
     queueAnalysisInstance = queue_analysis_live.QueueAnalysis(
         weights="../yolo_head_detection.pt",
         source=request.json["streamUrl"],
-        finish_area=request.json["finishAreaPoints"],
-        queue_polygon=request.json["queueAreaPoints"],
+        finish_area=finish_polygon,
+        queue_polygon=queue_polygon,
         device="0",
     )
     liveAnalysisInstance[uid] = queueAnalysisInstance
