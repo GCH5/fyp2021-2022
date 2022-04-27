@@ -34,8 +34,8 @@ The backend server is a simple [Flask](https://flask.palletsprojects.com/) serve
 
 ## <div align="center">Dataset</div>
 
-[train]()(500 iamges in the train set, 100 in the test set)
-[test]()
+Download the dataset [here](https://drive.google.com/file/d/1NIAVYiDRWg-_cg3inZkX-ovZ-dwSIB88/view?usp=sharing)
+The dataset consists of 200+ labeled images used in our project for training the YOLOv5 head detector. Scenarios in this dataset include Mall and Canteen.
 
 ## <div align="center">Pretrained weights</div>
 
